@@ -19,11 +19,13 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 	"unicode"
 )
@@ -176,6 +178,12 @@ func (s *session) errorf(format string, args ...interface{}) {
 	log.Printf("Client error: "+format, args...)
 }
 
+// isClientDisconnect reports whether err means the client closed or
+// reset the connection.
+func isClientDisconnect(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET)
+}
+
 func (s *session) sendf(format string, args ...interface{}) {
 	if s.srv.WriteTimeout != 0 {
 		s.rwc.SetWriteDeadline(time.Now().Add(s.srv.WriteTimeout))
@@ -211,12 +219,17 @@ func (s *session) serve() {
 		}
 	}
 	s.sendf("220 %s ESMTP gosmtpd\r\n", s.srv.hostname())
-	for {
+	for gotCommand := false; ; gotCommand = true {
 		if s.srv.ReadTimeout != 0 {
 			s.rwc.SetReadDeadline(time.Now().Add(s.srv.ReadTimeout))
 		}
 		sl, err := s.br.ReadSlice('\n')
 		if err != nil {
+			// Health check probes (e.g. load balancers) connect and then
+			// close or reset the connection without sending any command.
+			if !gotCommand && isClientDisconnect(err) {
+				return
+			}
 			s.errorf("read error: %v", err)
 			return
 		}
